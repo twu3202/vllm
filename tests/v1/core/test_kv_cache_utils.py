@@ -3848,7 +3848,7 @@ def test_iter_layer_specs_returns_group_members():
     assert list(iter_layer_specs(wrapped)) == [full, mla]
 
 
-def _spec_decode_grouping_config(method="dspark", model_type=None):
+def _spec_decode_grouping_config(method="dspark", model_type=None, block_drop=True):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
@@ -3861,7 +3861,7 @@ def _spec_decode_grouping_config(method="dspark", model_type=None):
         speculative_config=SimpleNamespace(
             method=method,
             use_eagle=lambda: True,
-            use_eagle_block_drop=lambda: True,
+            use_eagle_block_drop=lambda: block_drop,
         ),
     )
 
@@ -3928,19 +3928,27 @@ def test_draft_group_not_annotated_without_spec_decode():
     assert not any(g.is_eagle_group for g in groups)
 
 
-def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+@pytest.mark.parametrize("block_drop", [True, False])
+def test_unidentifiable_draft_with_mamba_warns(caplog_vllm, block_drop):
+    # No group carries the draft marker. With the trailing-block drop enabled,
+    # every consumer falls back to flagging all groups -- including Mamba ones,
+    # which then can never report a hit. That is silent today; it must at least
+    # be visible.
+    #
+    # With disable_eagle_block_drop set, every one of those fallbacks is gated
+    # off, no group is treated as a draft group and cross-request reuse keeps
+    # working -- so the warning would be plainly false and must stay quiet.
     groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
+        _spec_decode_grouping_config(block_drop=block_drop),
+        _hybrid_specs_with_draft(draft=False),
     )
 
     assert not any(g.is_eagle_group for g in groups)
-    assert "no KV cache group could be identified as the draft model's" in (
+    warned = "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+    assert warned == block_drop
+    assert ("Mamba groups" in caplog_vllm.text) == block_drop
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
